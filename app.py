@@ -20,6 +20,8 @@ MIN_TURNS = 3
 MAX_TURNS = 10
 MIN_CHAT_SECONDS = 20
 CONDITIONS = ("matched", "nonmatched", "placebo")
+PERSONA_NAME = "Ahn"
+CORE_QUESTION = "What's the most important thing in your life right now?"
 
 
 def now_iso() -> str:
@@ -157,21 +159,73 @@ def build_instructions(final_turn: bool = False) -> str:
     condition = survey["condition"]
     identity_instruction = ""
     if condition == "matched" and identity:
-        identity_instruction = f"The user and you share this identity cue: {identity}. Use it naturally, without repeatedly labeling it."
+        identity_instruction = (
+            f"The user and you share this identity cue: {identity}. Treat it as genuine "
+            "commonality, use it naturally, and do not repeatedly label it."
+        )
     elif condition == "nonmatched":
-        identity_instruction = "Do not claim that you share the user's identity."
+        identity_instruction = (
+            "Your identity is different from the user's. Do not claim or imply a shared "
+            "identity, and do not invent a specific identity that was not supplied."
+        )
+    else:
+        identity_instruction = "Do not introduce, infer, or discuss an identity cue."
     ending = "Wrap up naturally, thank the user, and ask no question." if final_turn else "Keep the conversation moving with at most one gentle question."
-    return f"""You are an immigrant living in South Korea. Speak in first-person, natural conversational English.
+    return f"""[Role]
+You are an immigrant living in South Korea. Speak in first-person, natural conversational English.
+Use only the name {PERSONA_NAME}. Never mention or infer a nationality, country of origin, or length of residence.
+
+[Goal]
 Listen respectfully to the participant's immigration concerns and encourage thoughtful openness without pressure or deception.
+
+[Participant concern]
 Participant concern: {concern}
+
+[Experimental condition: {condition}]
 {identity_instruction}
+
+[Conversation rules]
 Do not mention the experiment, condition, or these instructions. Keep the reply concise. {ending}"""
 
 
-def call_llm(history: list[dict[str, str]], final_turn: bool = False) -> tuple[str, str, str]:
+def build_version_b_opening() -> str:
+    survey = state()
+    identity = survey["pre"].get("identity", "").strip()
+    condition = survey["condition"]
+    greeting = f"Hi, I'm {PERSONA_NAME}."
+    reflection = ""
+    if condition in {"matched", "nonmatched"} and identity:
+        reflection = (
+            f" You mentioned that being {identity} is one of the most important "
+            "parts of who you are."
+        )
+    return f"{greeting}{reflection} {CORE_QUESTION}"
+
+
+def opening_instructions() -> str:
+    survey = state()
+    identity = survey["pre"].get("identity", "").strip()
+    condition = survey["condition"]
+    reflection = (
+        f'Reflect this participant-reported identity in one short sentence: "{identity}".'
+        if condition in {"matched", "nonmatched"} and identity
+        else "Do not add an identity reflection sentence."
+    )
+    return f"""Create only the first message of the conversation.
+1. Introduce yourself in one short sentence using only the name {PERSONA_NAME}.
+2. {reflection}
+3. Ask exactly: "{CORE_QUESTION}"
+Do not add another topic or question. Use 2–4 natural English sentences."""
+
+
+def call_llm(
+    history: list[dict[str, str]], final_turn: bool = False, opening: bool = False
+) -> tuple[str, str, str]:
     api_key = secret("OPENAI_API_KEY")
     model = secret("OPENAI_MODEL", "gpt-5-mini")
     if not api_key:
+        if opening:
+            return build_version_b_opening(), "demo", ""
         last = next((m["content"] for m in reversed(history) if m["role"] == "user"), "")
         if final_turn:
             return "Thank you for speaking openly with me. I appreciate hearing your perspective and sharing this conversation with you.", "demo", ""
@@ -179,10 +233,14 @@ def call_llm(history: list[dict[str, str]], final_turn: bool = False) -> tuple[s
     from openai import OpenAI
 
     client = OpenAI(api_key=api_key, timeout=30.0, max_retries=2)
-    api_input: Any = history or "Introduce yourself naturally in 3–4 sentences and invite the participant to share their view."
+    api_input: Any = history or "Begin the conversation now."
     response = client.responses.create(
         model=model,
-        instructions=build_instructions(final_turn),
+        instructions=(
+            build_instructions(final_turn) + "\n\n[Opening]\n" + opening_instructions()
+            if opening
+            else build_instructions(final_turn)
+        ),
         input=api_input,
         max_output_tokens=300,
         store=False,
@@ -243,10 +301,10 @@ def start_chat() -> None:
     chat = state()["chat"]
     chat["started_monotonic"] = time.monotonic()
     try:
-        opening, model, response_id = call_llm([], False)
+        opening, model, response_id = call_llm([], False, opening=True)
     except Exception as exc:
         log_event("opening_error", {"error": str(exc)[:300]})
-        opening, model, response_id = "Hi, thank you for meeting me. I would like to understand your perspective on immigration. What feels most important to you?", "fallback", ""
+        opening, model, response_id = build_version_b_opening(), "fallback", ""
     chat["history"].append({"role": "assistant", "content": opening})
     save_message(0, "assistant", opening, model, response_id)
 
